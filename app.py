@@ -1,64 +1,76 @@
 import gradio as gr
-from huggingface_hub import InferenceClient
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-"""
-For more information on `huggingface_hub` Inference API support, please check the docs: https://huggingface.co/docs/huggingface_hub/v0.22.2/en/guides/inference
-"""
-client = InferenceClient("HuggingFaceH4/zephyr-7b-beta")
+# Load CodeGen model
+model_name = "Salesforce/codegen-350M-mono"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
 
+# Set padding token
+tokenizer.pad_token = tokenizer.eos_token
+model.config.pad_token_id = model.config.eos_token_id
 
-def respond(
-    message,
-    history: list[tuple[str, str]],
-    system_message,
-    max_tokens,
-    temperature,
-    top_p,
-):
-    messages = [{"role": "system", "content": system_message}]
+# Language templates
+language_templates = {
+    "Python": "# Language: Python\n# Task: ",
+    "JavaScript": "// Language: JavaScript\n// Task: ",
+    "C++": "// Language: C++\n// Task: ",
+    "Java": "// Language: Java\n// Task: ",
+    "HTML": "<!-- Language: HTML -->\n<!-- Task: ",
+    "SQL": "-- Language: SQL\n-- Task: ",
+    "Bash": "# Language: Bash\n# Task: "
+}
 
-    for val in history:
-        if val[0]:
-            messages.append({"role": "user", "content": val[0]})
-        if val[1]:
-            messages.append({"role": "assistant", "content": val[1]})
-
-    messages.append({"role": "user", "content": message})
-
-    response = ""
-
-    for message in client.chat_completion(
-        messages,
-        max_tokens=max_tokens,
-        stream=True,
+# Code generation function
+def generate_code(prompt, language="Python", temperature=0.7, max_tokens=256):
+    template = language_templates.get(language, "")
+    full_prompt = template + prompt + "\n"
+    
+    inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
+    outputs = model.generate(
+        **inputs,
+        max_length=len(inputs["input_ids"][0]) + max_tokens,
         temperature=temperature,
-        top_p=top_p,
-    ):
-        token = message.choices[0].delta.content
+        top_p=0.95,
+        top_k=50,
+        do_sample=True,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id
+    )
+    
+    generated_code = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return generated_code[len(full_prompt):].strip()
 
-        response += token
-        yield response
+# Chat function with history
+def chat_with_codegen(user_input, language, history):
+    if not user_input.strip():
+        return history, "Please enter a prompt."
 
+    generated_code = generate_code(user_input, language)
+    history.append((f"[{language}] {user_input}", generated_code))
+    return history, generated_code
 
-"""
-For information on how to customize the ChatInterface, peruse the gradio docs: https://www.gradio.app/docs/chatinterface
-"""
-demo = gr.ChatInterface(
-    respond,
-    additional_inputs=[
-        gr.Textbox(value="You are a friendly Chatbot.", label="System message"),
-        gr.Slider(minimum=1, maximum=2048, value=512, step=1, label="Max new tokens"),
-        gr.Slider(minimum=0.1, maximum=4.0, value=0.7, step=0.1, label="Temperature"),
-        gr.Slider(
-            minimum=0.1,
-            maximum=1.0,
-            value=0.95,
-            step=0.05,
-            label="Top-p (nucleus sampling)",
-        ),
-    ],
-)
+# Gradio UI
+with gr.Blocks(title="Multilingual CodeGen Chatbot with History") as demo:
+    gr.Markdown("## 🤖 CodeGen Chatbot with Language Support + Prompt History")
+    gr.Markdown("Describe what you want the code to do. Select a language. Click Generate!")
 
+    with gr.Row():
+        lang_choice = gr.Dropdown(choices=list(language_templates.keys()), value="Python", label="💬 Language")
+        user_input = gr.Textbox(label="📝 Your Prompt", placeholder="e.g., Write a function to reverse a string")
 
-if __name__ == "__main__":
-    demo.launch()
+    chatbot = gr.Chatbot(label="🧠 Chat History")
+    output = gr.Code(label="🧾 Generated Code")
+
+    state = gr.State([])  # Keeps history
+
+    generate_btn = gr.Button("🚀 Generate Code")
+
+    generate_btn.click(
+        fn=chat_with_codegen,
+        inputs=[user_input, lang_choice, state],
+        outputs=[chatbot, output]
+    )
+
+demo.launch()
+
